@@ -21,13 +21,20 @@ LOG_MODULE_REGISTER(net_wifi_shell, LOG_LEVEL_INF);
 #include <zephyr/init.h>
 
 #include <zephyr/net/net_if.h>
+#include <zephyr/net/net_core.h>
+#include <zephyr/net/net_l2.h>
 #include <zephyr/net/net_event.h>
 #include <zephyr/net/wifi_mgmt.h>
 #include <zephyr/net/wifi_utils.h>
 #include <zephyr/posix/unistd.h>
 #include <zephyr/sys/slist.h>
 
+#include <zephyr/net/ethernet.h>
+#include <zephyr/net/socket.h>
+#include <zephyr/net/ethernet_mgmt.h>
+
 #include "net_private.h"
+#define CONFIG_WIFI_MAC_ADDRESS "F6:CE:36:00:00:01"
 
 #define WIFI_SHELL_MODULE "wifi"
 
@@ -1553,6 +1560,214 @@ static int cmd_wifi_ps_wakeup_mode(const struct shell *sh, size_t argc, char *ar
 	return 0;
 }
 
+struct rawpkt_info {
+        /** Magic number to distinguish packet is raw packet */
+        unsigned int magic_number;
+        /** Data rate of the packet */
+        unsigned short data_rate;
+        /** Packet length */
+        unsigned short packet_length;
+        /** Mode describing if packet is VHT, HT, HE or Legacy */
+        unsigned char tx_mode;
+        /** Wi-Fi access category mapping for packet */
+        unsigned char queue;
+        /** reserved char variable for driver */
+        unsigned char reserved;
+};
+
+enum rpu_tput_mode {
+	/** Legacy mode */
+	RPU_TPUT_MODE_LEGACY,
+	/** High Throuput mode(11n) */
+	RPU_TPUT_MODE_HT,
+	/** Very hight throughput(11ac) */
+	RPU_TPUT_MODE_VHT,
+	/** HE SU mode */
+	RPU_TPUT_MODE_HE_SU,
+	/** HE ER SU mode */
+	RPU_TPUT_MODE_HE_ER_SU,
+	/** HE TB mode */
+	RPU_TPUT_MODE_HE_TB,
+	/** Highest throughput mode currently defined */
+	RPU_TPUT_MODE_MAX
+};
+
+#if 0
+unsigned char lorem_ipsum[] =
+        "vivek performed socket send"
+        "\n";
+#else
+unsigned char lorem_ipsum[] = {
+0x80, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xa0, 0x59, 0x50, 0xe3, 0x52, 0x15,
+0xa0, 0x59, 0x50, 0xe3, 0x52, 0x15, 0xb0, 0x53,
+0xf0, 0xcf, 0x29, 0x8e, 0x00, 0x00, 0x00, 0x00, 0x64, 0x00, 0x11, 0x04, 0x00, 0x15, 0x4E, 0x52,
+0x46, 0x5F, 0x52, 0x41, 0x57, 0x5F, 0x54, 0x58, 0x5F, 0x50, 0x41, 0x43, 0x4B, 0x45, 0x54, 0x5F,
+0x41, 0x50, 0x50, 0x54, 0x72, 0x61, 0x63, 0x6b, 0x5f, 0x31, 0x36, 0x38, 0x36, 0x31, 0x32, 0x32,
+0x38, 0x36, 0x35, 0x01, 0x08, 0x82, 0x84, 0x8b, 0x96, 0x0c, 0x12, 0x18, 0x24, 0x03, 0x01, 0x06,
+0x05, 0x04, 0x00, 0x02, 0x00, 0x00, 0x2a, 0x01, 0x04, 0x32, 0x04, 0x30, 0x48, 0x60, 0x6c, 0x30,
+0x14, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x04, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x04, 0x01, 0x00, 0x00,
+0x0f, 0xac, 0x02, 0xcc, 0x00, 0x3b, 0x02, 0x51, 0x00, 0x2d, 0x1a, 0x0c, 0x00, 0x17, 0xff, 0xff,
+0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2c, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+0x00, 0x00, 0x00, 0x3d, 0x16, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x7f, 0x08, 0x04, 0x00, 0x00, 0x02, 0x00, 0x00,
+0x00, 0x40, 0xff, 0x1a, 0x23, 0x01, 0x78, 0x10, 0x1a, 0x00, 0x00, 0x00, 0x20, 0x0e, 0x09, 0x00,
+0x09, 0x80, 0x04, 0x01, 0xc4, 0x00, 0xfa, 0xff, 0xfa, 0xff, 0x61, 0x1c, 0xc7, 0x71, 0xff, 0x07,
+0x24, 0xf0, 0x3f, 0x00, 0x81, 0xfc, 0xff, 0xdd, 0x18, 0x00, 0x50, 0xf2, 0x02, 0x01, 0x01, 0x01,
+0x00, 0x03, 0xa4, 0x00, 0x00, 0x27, 0xa4, 0x00, 0x00, 0x42, 0x43, 0x5e, 0x00, 0x62, 0x32, 0x2f, 0x00
+};
+#endif
+
+#define RECV_BUFFER_SIZE 1000
+#define WIFI_MAC_ADDR_LEN 6
+
+struct packet_data {
+        int send_sock;
+        int recv_sock;
+        char recv_buffer[RECV_BUFFER_SIZE];
+};
+#define WIFI_SOCKET_SEND_MIN 1
+#define WIFI_SOCKET_SEND_MAX 100
+
+static int cmd_wifi_rawpacket(const struct shell *sh, size_t argc, char *argv[]) {
+	int ret;
+	struct net_if *iface;
+	struct packet_data pkt;
+	struct sockaddr_ll dst = { 0 };
+	unsigned char *buffer;
+	size_t length;
+	struct rawpkt_info pkt_info;
+	struct net_linkaddr *linkaddr = NULL;
+	long num_of_sends = 0;
+
+	if (!parse_number(sh, &num_of_sends, argv[1],
+			  WIFI_SOCKET_SEND_MIN,
+			  WIFI_SOCKET_SEND_MAX)) {
+		return -EINVAL;
+	}
+
+	shell_fprintf(sh, SHELL_ERROR, "num_of_sends is %ld\n", num_of_sends);
+
+	pkt.send_sock = socket(AF_PACKET, SOCK_RAW, IPPROTO_RAW);
+
+	if (pkt.send_sock < 0) {
+		shell_fprintf(sh, SHELL_ERROR, "Failed to create raw socket : %d\n", errno);
+		return -errno;
+	} else {
+		shell_fprintf(sh, SHELL_ERROR, "raw socket created\n");
+        }
+
+	iface = net_if_get_first_wifi();
+	linkaddr = net_if_get_link_addr(iface);
+
+	dst.sll_ifindex = net_if_get_by_iface(net_if_get_first_wifi());
+	dst.sll_halen = WIFI_MAC_ADDR_LEN;
+	memcpy(dst.sll_addr, linkaddr->addr, WIFI_MAC_ADDR_LEN);
+	dst.sll_family = AF_PACKET;
+
+	ret = bind(pkt.send_sock, (const struct sockaddr *)&dst,
+			sizeof(struct sockaddr_ll));
+
+	if (ret < 0) {
+		shell_fprintf(sh, SHELL_ERROR, "Failed to bind packet socket : %d\n", errno);
+		return -errno;
+	} else {
+		shell_fprintf(sh, SHELL_ERROR, "bind packet successful\n");
+	}
+
+	buffer = (unsigned char *)malloc(sizeof(struct rawpkt_info) + sizeof(lorem_ipsum));
+	length = sizeof(struct rawpkt_info) + sizeof(lorem_ipsum);
+
+	pkt_info.magic_number = 0x12345678;
+	pkt_info.data_rate = 6;
+	pkt_info.packet_length = sizeof(lorem_ipsum);
+	pkt_info.queue = 1;
+	pkt_info.tx_mode = RPU_TPUT_MODE_VHT;
+
+	shell_fprintf(sh, SHELL_ERROR, "length of loremipsum is %d\n", sizeof(lorem_ipsum));
+	shell_fprintf(sh, SHELL_ERROR, "length of struct is %d\n", sizeof(struct rawpkt_info));
+	shell_fprintf(sh, SHELL_ERROR, "total length is %d\n", length);
+
+	memcpy(buffer, &pkt_info, sizeof(struct rawpkt_info));
+	memcpy((buffer+sizeof(struct rawpkt_info)), lorem_ipsum, sizeof(lorem_ipsum));
+
+	while (num_of_sends > 0) {	
+		/* Sending dummy data */
+		ret = sendto(pkt.send_sock, buffer, length, 0,
+				(const struct sockaddr *)&dst,
+				sizeof(struct sockaddr_ll));
+
+		if (ret < 0) {
+			shell_fprintf(sh, SHELL_ERROR, "Failed to send, errno %d\n", errno);
+		} else {
+			shell_fprintf(sh, SHELL_ERROR, "send successful %ld\n", num_of_sends);
+		}
+		num_of_sends--;
+	}
+	(void)close(pkt.send_sock);
+	shell_fprintf(sh, SHELL_ERROR, "socket closed\n");
+
+	return 0;
+}
+
+#define WIFI_TXINJECT_ENABLE_MIN 0
+#define WIFI_TXINJECT_ENABLE_MAX 1
+
+static int cmd_wifi_txinjection(const struct shell *sh, size_t argc, char *argv[]) 
+{
+	int ret;
+	struct net_if *iface;
+	long enable = 0;
+	struct ethernet_req_params params = {0};
+
+	if (!parse_number(sh, &enable, argv[1],
+			  WIFI_TXINJECT_ENABLE_MIN,
+			  WIFI_TXINJECT_ENABLE_MAX)) {
+		return -EINVAL;
+	}
+
+	iface = net_if_get_first_wifi();
+
+        ret = net_mgmt(NET_REQUEST_ETHERNET_GET_TXINJECTION_MODE, iface,
+                        &params, sizeof(struct ethernet_req_params));
+
+	if (ret != 0) {
+		shell_fprintf(sh, SHELL_ERROR, "iface %p txinjection get mode failed: %d", iface, ret);
+        } else {
+		shell_fprintf(sh, SHELL_ERROR, "iface %p txinjection get mode: %d", iface, params.txinjection_mode);
+	}
+
+	ret = net_eth_txinjection_mode(iface, enable);
+	
+	if (ret != 0) {
+		shell_fprintf(sh, SHELL_ERROR, "iface %p txinjection mode failed: %d", iface, ret);
+	}
+	
+	return 0;
+}
+
+static int cmd_wifi_promisc(const struct shell *sh, size_t argc, char *argv[])
+{
+       int ret;
+       struct net_if *iface;
+       long enable = 0;
+       struct ethernet_req_params params = {0};
+
+       if (!parse_number(sh, &enable, argv[1],
+                         WIFI_TXINJECT_ENABLE_MIN,
+                         WIFI_TXINJECT_ENABLE_MAX)) {
+               return -EINVAL;
+       }
+
+       iface = net_if_get_first_wifi();
+
+       ret = net_eth_promisc_mode(iface, enable);
+       if (ret != 0) {
+               shell_fprintf(sh, SHELL_ERROR, "iface %p promisc mode failed: %d", iface, ret);
+       }
+
+       return 0;
+}
+
 void parse_mode_args_to_params(const struct shell *sh, int argc,
 			       char *argv[], struct wifi_mode_info *mode,
 			       bool *do_mode_oper)
@@ -1637,6 +1852,8 @@ static int cmd_wifi_mode(const struct shell *sh, size_t argc, char *argv[])
 			}
 		}
 
+		shell_fprintf(sh, SHELL_ERROR, "mode_info operation is %d\n", mode_info.oper);
+	
 		ret = net_mgmt(NET_REQUEST_WIFI_MODE, iface, &mode_info, sizeof(mode_info));
 
 		if (ret) {
@@ -1967,6 +2184,21 @@ SHELL_STATIC_SUBCMD_SET_CREATE(wifi_commands,
 	SHELL_CMD_ARG(statistics, NULL, "Wi-Fi interface statistics.\n", cmd_wifi_stats, 1, 0),
 	SHELL_CMD_ARG(status, NULL, "Status of the Wi-Fi interface.\n", cmd_wifi_status, 1, 0),
 	SHELL_CMD(twt, &wifi_twt_ops, "Manage TWT flows.\n", NULL),
+	SHELL_CMD(raw_packet, NULL, "send a test raw packet\n"
+		"This command may be used to send a raw packet\n"
+		"Usage: \n"
+		"wifi raw_packet\n",
+		cmd_wifi_rawpacket),
+	SHELL_CMD(txinject_set, NULL, "set txinjection mode\n"
+		"This command may be used to enable or disable txinjection mode\n"
+		"Usage: \n"
+		"wifi txinject_set 1 or 0\n",
+		cmd_wifi_txinjection),
+	SHELL_CMD(promisc_set, NULL, "set promisc mode\n"
+		"This command may be used to enable or disable promiscuous mode\n"
+		"Usage: \n"
+		"wifi promisc_set 1 or 0\n",
+		cmd_wifi_promisc),	
 	SHELL_CMD_ARG(reg_domain, NULL,
 		"Set or Get Wi-Fi regulatory domain\n"
 		"[ISO/IEC 3166-1 alpha2]: Regulatory domain\n"
